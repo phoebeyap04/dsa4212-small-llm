@@ -216,14 +216,37 @@ if ddp:
 def estimate_loss():
     out = {}
     model.eval()
+
+    # Evaluate on train and val splits
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
+        data = train_data if split == 'train' else val_data
+
+        losses = []
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            # Calculate deterministic indices for the batch
+            start_idx = k * batch_size * block_size
+            
+            # Check if we have enough data left for a full batch
+            if start_idx + (batch_size * block_size) + 1 > len(data):
+                break
+                
+            ix = torch.tensor([start_idx + i * block_size for i in range(batch_size)])
+            
+            x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+            y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+            
+            if device_type == 'cuda':
+                x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+            else:
+                x, y = x.to(device), y.to(device)
+                
             with ctx:
-                logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
+                logits, loss = model(x, y)
+            losses.append(loss.item())
+            
+        # Average the losses over the  deterministic blocks
+        out[split] = sum(losses) / len(losses) if losses else 0.0
+        
     model.train()
     return out
 
