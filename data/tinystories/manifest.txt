@@ -1,0 +1,12 @@
+Dataset Manifest: TinyStories (roneneldan/TinyStories)
+Normalization Rule: text.strip().lower()
+Duplicates Removed (Train): 320470
+
+| Split           | Story Count | Token Count | File              |
+|-----------------|-------------|-------------|-------------------|
+| Train (Small)   | 10000       | 2203244     | train_small.bin   |
+| Train (Large)   | 1000000     | 219406952   | train_large.bin   |
+| Validation      | 8039        | 1601531     | val.bin           |
+| Test (Held-out) | 7350        | 1551129     | test.bin          |
+
+Tokenizer: Byte-level BPE, 8000 Vocab (shared_bpe_tokenizer.json)
