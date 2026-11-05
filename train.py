@@ -17,6 +17,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import os
+import json
 import time
 import math
 import pickle
@@ -45,6 +46,11 @@ wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'openwebtext'
+train_file = 'train.bin' # we use train_small.bin or train_large.bin
+val_file = 'val.bin'
+vocab_size = 0 # our tokenizer has 8000 tokens, 0 means use the gpt2 default
+time_budget = 0.0 # seconds of training allowed (3600 = 1 hour), 0 means use max_iters
+seed = 1337
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
@@ -103,7 +109,7 @@ print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset)
+torch.manual_seed(seed + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
@@ -113,13 +119,19 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+train_path = os.path.join(data_dir, train_file)
+val_path = os.path.join(data_dir, val_file)
+# estimate_loss uses these
+train_data = np.memmap(train_path, dtype=np.uint16, mode='r')
+val_data = np.memmap(val_path, dtype=np.uint16, mode='r')
+print("train tokens:", len(train_data), "val tokens:", len(val_data))
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(train_path, dtype=np.uint16, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(val_path, dtype=np.uint16, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -133,6 +145,8 @@ def get_batch(split):
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
 best_val_loss = 1e9
+train_time = 0.0 # only counts training steps, not eval
+tokens_seen = 0
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
@@ -142,6 +156,8 @@ if os.path.exists(meta_path):
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+if vocab_size > 0:
+    meta_vocab_size = vocab_size
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -178,6 +194,9 @@ elif init_from == 'resume':
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
+    # keep the clock going when resuming, the budget does not reset
+    train_time = checkpoint['train_time']
+    tokens_seen = checkpoint['tokens_seen']
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -255,6 +274,11 @@ def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
+    # if we have a time budget, decay based on how much time is used up instead of iterations
+    if time_budget > 0:
+        decay_ratio = min(train_time / time_budget, 1.0)
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (learning_rate - min_lr)
     # 2) if it > lr_decay_iters, return min learning rate
     if it > lr_decay_iters:
         return min_lr
@@ -268,6 +292,31 @@ def get_lr(it):
 if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+
+def save_checkpoint(filename):
+    checkpoint = {
+        'model': raw_model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'model_args': model_args,
+        'iter_num': iter_num,
+        'best_val_loss': best_val_loss,
+        'config': config,
+        'train_time': train_time,
+        'tokens_seen': tokens_seen,
+    }
+    print(f"saving checkpoint to {out_dir}/{filename}")
+    torch.save(checkpoint, os.path.join(out_dir, filename))
+
+# write the losses to a csv file so we can plot them later
+log_path = os.path.join(out_dir, 'log.csv')
+if not os.path.exists(log_path):
+    with open(log_path, 'w') as f:
+        f.write("iter,train_time,tokens_seen,epochs,lr,train_loss,val_loss\n")
+
+def write_log(losses):
+    epochs = tokens_seen / len(train_data)
+    with open(log_path, 'a') as f:
+        f.write(f"{iter_num},{train_time:.1f},{tokens_seen},{epochs:.3f},{lr},{losses['train']:.4f},{losses['val']:.4f}\n")
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -285,7 +334,8 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, time used {train_time:.0f}s")
+        write_log(losses)
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -297,19 +347,11 @@ while True:
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                save_checkpoint('ckpt.pt')
     if iter_num == 0 and eval_only:
         break
 
+    step_start = time.time()
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
@@ -337,9 +379,13 @@ while True:
     optimizer.zero_grad(set_to_none=True)
 
     # timing and logging
+    if device_type == 'cuda':
+        torch.cuda.synchronize() # wait for the gpu to finish so the timing is correct
     t1 = time.time()
-    dt = t1 - t0
+    dt = t1 - step_start
     t0 = t1
+    train_time += dt
+    tokens_seen += tokens_per_iter
     if iter_num % log_interval == 0 and master_process:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
@@ -347,13 +393,45 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, {tokens_per_iter/dt:.0f} tokens/s, mfu {running_mfu*100:.2f}%")
     iter_num += 1
     local_iter_num += 1
 
     # termination conditions
-    if iter_num > max_iters:
+    if time_budget > 0 and train_time >= time_budget:
         break
+    if time_budget == 0 and iter_num > max_iters:
+        break
+
+# final evaluation and save results
+if master_process:
+    losses = estimate_loss()
+    print(f"final: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    write_log(losses)
+    save_checkpoint('final.pt')
+
+    total_params = sum(p.numel() for p in raw_model.parameters())
+    embedding_params = raw_model.transformer.wte.weight.numel() + raw_model.transformer.wpe.weight.numel()
+    results = {
+        'train_file': train_file,
+        'seed': seed,
+        'n_layer': n_layer,
+        'n_head': n_head,
+        'n_embd': n_embd,
+        'total_params': total_params,
+        'non_embedding_params': total_params - embedding_params,
+        'iters': iter_num,
+        'train_time': round(train_time, 1),
+        'tokens_seen': tokens_seen,
+        'epochs': round(tokens_seen / len(train_data), 3),
+        'tokens_per_sec': round(tokens_seen / train_time),
+        'final_train_loss': round(float(losses['train']), 4),
+        'final_val_loss': round(float(losses['val']), 4),
+        'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu',
+    }
+    with open(os.path.join(out_dir, 'summary.json'), 'w') as f:
+        json.dump(results, f, indent=2)
+    print(results)
 
 if ddp:
     destroy_process_group()

@@ -11,7 +11,7 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
-start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+start = "Once upon a time" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
@@ -58,7 +58,15 @@ load_meta = False
 if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']: # older checkpoints might not have these...
     meta_path = os.path.join('data', checkpoint['config']['dataset'], 'meta.pkl')
     load_meta = os.path.exists(meta_path)
-if load_meta:
+# our own tokenizer (from data/tinystories) instead of gpt2
+tokenizer_path = 'data/tinystories/shared_bpe_tokenizer.json'
+if init_from == 'resume' and os.path.exists(tokenizer_path):
+    from tokenizers import Tokenizer, decoders
+    tok = Tokenizer.from_file(tokenizer_path)
+    tok.decoder = decoders.ByteLevel()
+    encode = lambda s: tok.encode(s).ids
+    decode = lambda l: tok.decode(l)
+elif load_meta:
     print(f"Loading meta from {meta_path}...")
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
