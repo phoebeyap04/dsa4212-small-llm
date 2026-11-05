@@ -145,6 +145,7 @@ def get_batch(split):
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
 best_val_loss = 1e9
+best_iter = 0 # step where the val loss was lowest
 train_time = 0.0 # only counts training steps, not eval
 tokens_seen = 0
 
@@ -194,6 +195,7 @@ elif init_from == 'resume':
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
+    best_iter = checkpoint['best_iter']
     # keep the clock going when resuming, the budget does not reset
     train_time = checkpoint['train_time']
     tokens_seen = checkpoint['tokens_seen']
@@ -300,6 +302,7 @@ def save_checkpoint(filename):
         'model_args': model_args,
         'iter_num': iter_num,
         'best_val_loss': best_val_loss,
+        'best_iter': best_iter,
         'config': config,
         'train_time': train_time,
         'tokens_seen': tokens_seen,
@@ -344,9 +347,15 @@ while True:
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
+        # keep a separate copy of the model whenever the val loss is the lowest so far
+        is_best = losses['val'] < best_val_loss
+        if is_best:
             best_val_loss = losses['val']
-            if iter_num > 0:
+            best_iter = iter_num
+        if iter_num > 0:
+            if is_best:
+                save_checkpoint('best.pt')
+            if is_best or always_save_checkpoint:
                 save_checkpoint('ckpt.pt')
     if iter_num == 0 and eval_only:
         break
@@ -408,6 +417,10 @@ if master_process:
     losses = estimate_loss()
     print(f"final: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
     write_log(losses)
+    if losses['val'] < best_val_loss:
+        best_val_loss = losses['val']
+        best_iter = iter_num
+        save_checkpoint('best.pt')
     save_checkpoint('final.pt')
 
     total_params = sum(p.numel() for p in raw_model.parameters())
@@ -427,6 +440,9 @@ if master_process:
         'tokens_per_sec': round(tokens_seen / train_time),
         'final_train_loss': round(float(losses['train']), 4),
         'final_val_loss': round(float(losses['val']), 4),
+        'best_val_loss': round(float(best_val_loss), 4),
+        'best_iter': best_iter,
+        'best_epochs': round(best_iter * tokens_per_iter / len(train_data), 3),
         'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu',
     }
     with open(os.path.join(out_dir, 'summary.json'), 'w') as f:
