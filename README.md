@@ -16,6 +16,76 @@ The simplest, fastest repository for training/finetuning medium-sized GPTs. It i
 
 Because the code is so simple, it is very easy to hack to your needs, train new models from scratch, or finetune pretrained checkpoints (e.g. biggest one currently available as a starting point would be the GPT-2 1.3B model from OpenAI).
 
+## DSA4212 TinyStories evaluation
+
+Run `eval.py` separately after training. It reads the explicit `final.pt` (end
+of the training allowance) or `best.pt` (selected by training validation loss),
+using its saved `model_args` and weights. It does not train or select checkpoints.
+Dependencies are PyTorch and NumPy. From the notebook's `/content/repo` directory,
+with Drive mounted and the prepared data already available, run these Colab cells:
+
+```python
+%cd /content/repo
+!cp /content/drive/MyDrive/dsa4212/data/val.bin data/tinystories/val.bin
+run = '/content/drive/MyDrive/dsa4212/runs/small_small_seed1337'
+
+# Offline synthetic checks (no dataset download or training).
+!python -m unittest -v test_eval.py
+
+# Validation smoke test: first 4 target blocks, explicitly marked in the JSON.
+!python eval.py --checkpoint {run}/final.pt --split val --device cuda --precision float32 --batch-size 8 --context-length 256 --max-blocks 4 --output {run}/eval_final_val_smoke.json
+
+# Full validation: compare final and best using exactly the same protocol.
+!python eval.py --checkpoint {run}/final.pt --split val --device cuda --precision float32 --batch-size 8 --context-length 256 --output {run}/eval_final_val.json
+!python eval.py --checkpoint {run}/best.pt --split val --device cuda --precision float32 --batch-size 8 --context-length 256 --output {run}/eval_best_val.json
+```
+
+For final evaluation, after development choices are fixed, run:
+
+```python
+!cp /content/drive/MyDrive/dsa4212/data/test.bin data/tinystories/test.bin
+!python eval.py --checkpoint {run}/final.pt --split test --device cuda --precision float32 --batch-size 8 --context-length 256 --output {run}/eval_final_test.json
+!python eval.py --checkpoint {run}/best.pt --split test --device cuda --precision float32 --batch-size 8 --context-length 256 --output {run}/eval_best_test.json
+```
+
+Set `run` to each notebook run name (`{size}_{pool}_seed{seed}`, for small,
+medium, large model sizes, small/large pools and seeds 1337/2024). Use the same
+context length and precision for every comparison. CPU uses `--device cpu
+--precision float32`; CUDA also supports explicit `float16`/`bfloat16` autocast
+(T4 does not support bfloat16). Lower `--batch-size` if GPU memory is insufficient.
+The script never falls back to another split if the selected file is absent.
+Existing output files require explicit `--overwrite`; training artifacts are
+protected even with that flag. Evaluate only checkpoints you trust.
+
+The protocol reads the prepared raw native `uint16` stream, including EOS tokens.
+For context length L (default 256, shared by all three configurations), block k
+uses inputs `tokens[k*L:k*L+L]` and shifted targets
+`tokens[k*L+1:k*L+L+1]`. Context and position indices reset at each block;
+story boundaries are treated as ordinary EOS-separated stream boundaries, as in
+training. Targets never overlap: every token except stream token 0 is scored
+once. The final short block is evaluated at its actual length, without padding;
+no tail tokens are dropped, and a final incomplete batch is retained. Consequently
+the available context for each prediction ranges from 1 to L tokens. Contexts
+larger than the checkpoint's saved block size are rejected rather than silently
+reduced. `--max-blocks N` evaluates only the first N blocks for smoke testing and
+records excluded tokens; omit it for complete split evaluation.
+
+Evaluation uses `model.eval()` and inference mode. It sums float32 per-token
+next-token cross-entropies with float64 accumulation and divides by the valid
+target count (ignoring target -1 if present; prepared uint16 files contain no
+padding/ignored targets). Perplexity is `exp(mean_cross_entropy_nats)`; overflow
+is represented by JSON `null` with `perplexity_overflow: true`. JSON also records
+input SHA-256 hashes, saved model/run metadata, token counts, window settings,
+device, precision and elapsed time including loading/hashing. These complete
+split metrics differ from `train.py`'s bounded validation estimate. Deterministic
+ordering/kernels are enabled; floating-point results can still differ across
+hardware, precision, PyTorch versions and batch sizes.
+
+Synthetic checks cover shifting, boundary coverage, uneven batches, weighted
+loss with ignored targets, repeatability, compiled checkpoint prefixes, output
+protection, missing splits and perplexity overflow. Real training checkpoints,
+prepared split files and CUDA execution still require verification in Colab.
+
 ## install
 
 ```
