@@ -1,0 +1,20 @@
+{
+  "train_file": "train_large.bin",
+  "seed": 2024,
+  "n_layer": 6,
+  "n_head": 6,
+  "n_embd": 384,
+  "total_params": 13792128,
+  "non_embedding_params": 10621824,
+  "iters": 53634,
+  "train_time": 3600.1,
+  "tokens_seen": 439369728,
+  "epochs": 2.003,
+  "tokens_per_sec": 122045,
+  "final_train_loss": 1.4772,
+  "final_val_loss": 1.5154,
+  "best_val_loss": 1.5154,
+  "best_iter": 53634,
+  "best_epochs": 2.003,
+  "gpu": "Tesla T4"
+}
