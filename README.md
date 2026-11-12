@@ -83,8 +83,123 @@ hardware, precision, PyTorch versions and batch sizes.
 
 Synthetic checks cover shifting, boundary coverage, uneven batches, weighted
 loss with ignored targets, repeatability, compiled checkpoint prefixes, output
-protection, missing splits and perplexity overflow. Real training checkpoints,
-prepared split files and CUDA execution still require verification in Colab.
+protection, missing splits and perplexity overflow. Recorded full-test CUDA
+results are included below; reproducing them requires the original local inputs.
+
+## DSA4212 report reproducibility
+
+The 24 recorded held-out evaluations are in `results/test/`, named
+`{size}_{pool}_seed{seed}_{final|best}_test.json`: three model sizes, two data
+pools, two seeds (1337 and 2024), and two checkpoint types. The JSONs are exact
+copies of the files in the local source archive `test_results.zip`, including
+the original Kaggle paths and metadata. These historical paths identify the
+original environment; they do not need to exist on a new machine.
+
+Every result records the test split, context length 256, float32 evaluation,
+batch size 8, device `cuda:0`, and the complete test stream with no block limit.
+The stream has 1,551,129 raw uint16 tokens; 1,551,128 targets are scored. All
+results share this test-data SHA-256 (also verified against the local binary):
+
+```text
+fd3da30feb765b7611e31178d4544421c0ef793a0ae98a4f4abf4c7563f00ccd
+```
+
+### Regenerate the validation figure
+
+From the repository root, using a Python environment with Matplotlib:
+
+```sh
+python -m pip install matplotlib
+python plot_validation_loss.py
+```
+
+This saves `figures/validation_loss_all_runs.png` at 300 dpi. All 12 input logs
+are included under `runs/`; their downloaded filenames are retained:
+
+| Run | CSV path |
+| --- | --- |
+| small_small_seed1337 | `runs/small_small_seed1337/log (7).csv` |
+| small_small_seed2024 | `runs/small_small_seed2024/log (8).csv` |
+| small_large_seed1337 | `runs/small_large_seed1337/log (5).csv` |
+| small_large_seed2024 | `runs/small_large_seed2024/log (6).csv` |
+| medium_small_seed1337 | `runs/medium_small_seed1337/log (3).csv` |
+| medium_small_seed2024 | `runs/medium_small_seed2024/log (4).csv` |
+| medium_large_seed1337 | `runs/medium_large_seed1337/log (1).csv` |
+| medium_large_seed2024 | `runs/medium_large_seed2024/log (2).csv` |
+| large_small_seed1337 | `runs/large_small_seed1337/log (3).csv` |
+| large_small_seed2024 | `runs/large_small_seed2024/log (4).csv` |
+| large_large_seed1337 | `runs/large_large_seed1337/log (1).csv` |
+| large_large_seed2024 | `runs/large_large_seed2024/log (2).csv` |
+
+The script reports absent canonical `log.csv` names and explicitly selects
+the unique numbered download in each folder. It uses `train_time` in seconds
+(training steps only, excluding validation), converts to minutes, and plots
+recorded validation losses without smoothing or seed averaging. The four panels
+share scales, model colors and one legend. Original CSVs are never edited.
+In memory only, it excludes one identical duplicate step-0 row from
+`medium_small_seed2024` and original-segment steps 135000 and 135440 from
+`small_large_seed1337`, keeping the resumed segment from step 135000 onward.
+Unexpected non-increasing steps or backwards time cause an error.
+
+### Reproduce the held-out evaluations
+
+Checkpoints and binary datasets are local inputs, excluded from Git. Preserve
+the original files and place them in the existing layout below (a fresh clone
+requires obtaining these original inputs separately):
+
+```text
+final_folder/test.bin
+final_folder/{size}_{pool}_seed{seed}.pt
+best_folder/{size}_{pool}_seed{seed}_best.pt
+```
+
+Use the original prepared `test.bin`; do not regenerate the tokenizer or splits
+to reproduce these results. Alternatively, put that same binary in
+`data/tinystories/test.bin` and change `--data-dir` to `data/tinystories`.
+From the repo root on a CUDA machine with PyTorch and NumPy installed:
+
+```sh
+python -m pip install torch numpy
+python -m unittest -v test_eval.py
+python -c "import hashlib; from pathlib import Path; p=Path('final_folder/test.bin'); assert hashlib.sha256(p.read_bytes()).hexdigest() == 'fd3da30feb765b7611e31178d4544421c0ef793a0ae98a4f4abf4c7563f00ccd'"
+
+# One run, evaluating final and best separately with the same full-test protocol.
+python eval.py --checkpoint final_folder/small_small_seed1337.pt --data-dir final_folder --split test --context-length 256 --precision float32 --batch-size 8 --device cuda:0 --output results/reproduced/test/small_small_seed1337_final_test.json
+python eval.py --checkpoint best_folder/small_small_seed1337_best.pt --data-dir final_folder --split test --context-length 256 --precision float32 --batch-size 8 --device cuda:0 --output results/reproduced/test/small_small_seed1337_best_test.json
+```
+
+To reproduce all 24 results, run this Bash loop instead of the two example calls:
+
+```bash
+for size in small medium large; do
+  for pool in small large; do
+    for seed in 1337 2024; do
+      run="${size}_${pool}_seed${seed}"
+      python eval.py --checkpoint "final_folder/${run}.pt" --data-dir final_folder --split test --context-length 256 --precision float32 --batch-size 8 --device cuda:0 --output "results/reproduced/test/${run}_final_test.json" || exit 1
+      python eval.py --checkpoint "best_folder/${run}_best.pt" --data-dir final_folder --split test --context-length 256 --precision float32 --batch-size 8 --device cuda:0 --output "results/reproduced/test/${run}_best_test.json" || exit 1
+    done
+  done
+done
+```
+
+There is no `--max-blocks` limit in these commands. New outputs go to a separate
+directory so the recorded JSONs remain untouched. Existing output paths are
+rejected unless `--overwrite` is explicitly supplied. The recorded environment
+was a Tesla T4 with PyTorch `2.11.0+cu130`; numerical results may vary with
+hardware and software versions. Each JSON records checkpoint and dataset hashes
+for checking exact input identity.
+
+### Known checkpoint/summary discrepancy
+
+For `small_large_seed1337`, the saved **best checkpoint evaluated on test is
+from step 135440**, as recorded by `run_metadata.iter_num` in
+`results/test/small_large_seed1337_best_test.json`. Its training summary lists
+step **134500** as best (reported by the experiment owner; the summary file is
+not present in this repository). Therefore the best test metric describes the
+saved step-135440 checkpoint, not a step-134500 model. The resumed final
+checkpoint's recorded step is 135001. This provenance discrepancy is retained;
+neither evaluation JSONs nor original logs have been rewritten, and the plot's
+in-memory resume repair does not change which checkpoint was evaluated.
 
 ## install
 
@@ -199,106 +314,4 @@ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.4
 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 ```
 
-It is a good idea to benchmark your interconnect (e.g. iperf3). In particular, if you don't have Infiniband then also prepend `NCCL_IB_DISABLE=1` to the above launches. Your multinode training will work, but most likely _crawl_. By default checkpoints are periodically written to the `--out_dir`. We can sample from the model by simply `python sample.py`.
-
-Finally, to train on a single GPU simply run the `python train.py` script. Have a look at all of its args, the script tries to be very readable, hackable and transparent. You'll most likely want to tune a number of those variables depending on your needs.
-
-## baselines
-
-OpenAI GPT-2 checkpoints allow us to get some baselines in place for openwebtext. We can get the numbers as follows:
-
-```sh
-$ python train.py config/eval_gpt2.py
-$ python train.py config/eval_gpt2_medium.py
-$ python train.py config/eval_gpt2_large.py
-$ python train.py config/eval_gpt2_xl.py
-```
-
-and observe the following losses on train and val:
-
-| model | params | train loss | val loss |
-| ------| ------ | ---------- | -------- |
-| gpt2 | 124M         | 3.11  | 3.12     |
-| gpt2-medium | 350M  | 2.85  | 2.84     |
-| gpt2-large | 774M   | 2.66  | 2.67     |
-| gpt2-xl | 1558M     | 2.56  | 2.54     |
-
-However, we have to note that GPT-2 was trained on (closed, never released) WebText, while OpenWebText is just a best-effort open reproduction of this dataset. This means there is a dataset domain gap. Indeed, taking the GPT-2 (124M) checkpoint and finetuning on OWT directly for a while reaches loss down to ~2.85. This then becomes the more appropriate baseline w.r.t. reproduction.
-
-## finetuning
-
-Finetuning is no different than training, we just make sure to initialize from a pretrained model and train with a smaller learning rate. For an example of how to finetune a GPT on new text go to `data/shakespeare` and run `prepare.py` to download the tiny shakespeare dataset and render it into a `train.bin` and `val.bin`, using the OpenAI BPE tokenizer from GPT-2. Unlike OpenWebText this will run in seconds. Finetuning can take very little time, e.g. on a single GPU just a few minutes. Run an example finetuning like:
-
-```sh
-python train.py config/finetune_shakespeare.py
-```
-
-This will load the config parameter overrides in `config/finetune_shakespeare.py` (I didn't tune them much though). Basically, we initialize from a GPT2 checkpoint with `init_from` and train as normal, except shorter and with a small learning rate. If you're running out of memory try decreasing the model size (they are `{'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}`) or possibly decreasing the `block_size` (context length). The best checkpoint (lowest validation loss) will be in the `out_dir` directory, e.g. in `out-shakespeare` by default, per the config file. You can then run the code in `sample.py --out_dir=out-shakespeare`:
-
-```
-THEODORE:
-Thou shalt sell me to the highest bidder: if I die,
-I sell thee to the first; if I go mad,
-I sell thee to the second; if I
-lie, I sell thee to the third; if I slay,
-I sell thee to the fourth: so buy or sell,
-I tell thee again, thou shalt not sell my
-possession.
-
-JULIET:
-And if thou steal, thou shalt not sell thyself.
-
-THEODORE:
-I do not steal; I sell the stolen goods.
-
-THEODORE:
-Thou know'st not what thou sell'st; thou, a woman,
-Thou art ever a victim, a thing of no worth:
-Thou hast no right, no right, but to be sold.
-```
-
-Whoa there, GPT, entering some dark place over there. I didn't really tune the hyperparameters in the config too much, feel free to try!
-
-## sampling / inference
-
-Use the script `sample.py` to sample either from pre-trained GPT-2 models released by OpenAI, or from a model you trained yourself. For example, here is a way to sample from the largest available `gpt2-xl` model:
-
-```sh
-python sample.py \
-    --init_from=gpt2-xl \
-    --start="What is the answer to life, the universe, and everything?" \
-    --num_samples=5 --max_new_tokens=100
-```
-
-If you'd like to sample from a model you trained, use the `--out_dir` to point the code appropriately. You can also prompt the model with some text from a file, e.g. ```python sample.py --start=FILE:prompt.txt```.
-
-## efficiency notes
-
-For simple model benchmarking and profiling, `bench.py` might be useful. It's identical to what happens in the meat of the training loop of `train.py`, but omits much of the other complexities.
-
-Note that the code by default uses [PyTorch 2.0](https://pytorch.org/get-started/pytorch-2.0/). At the time of writing (Dec 29, 2022) this makes `torch.compile()` available in the nightly release. The improvement from the one line of code is noticeable, e.g. cutting down iteration time from ~250ms / iter to 135ms / iter. Nice work PyTorch team!
-
-## todos
-
-- Investigate and add FSDP instead of DDP
-- Eval zero-shot perplexities on standard evals (e.g. LAMBADA? HELM? etc.)
-- Finetune the finetuning script, I think the hyperparams are not great
-- Schedule for linear batch size increase during training
-- Incorporate other embeddings (rotary, alibi)
-- Separate out the optim buffers from model params in checkpoints I think
-- Additional logging around network health (e.g. gradient clip events, magnitudes)
-- Few more investigations around better init etc.
-
-## troubleshooting
-
-Note that by default this repo uses PyTorch 2.0 (i.e. `torch.compile`). This is fairly new and experimental, and not yet available on all platforms (e.g. Windows). If you're running into related error messages try to disable this by adding `--compile=False` flag. This will slow down the code but at least it will run.
-
-For some context on this repository, GPT, and language modeling it might be helpful to watch my [Zero To Hero series](https://karpathy.ai/zero-to-hero.html). Specifically, the [GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY) is popular if you have some prior language modeling context.
-
-For more questions/discussions feel free to stop by **#nanoGPT** on Discord:
-
-[![](https://dcbadge.vercel.app/api/server/3zy8kqD9Cp?compact=true&style=flat)](https://discord.gg/3zy8kqD9Cp)
-
-## acknowledgements
-
-All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.com), my favorite Cloud GPU provider. Thank you Lambda labs for sponsoring nanoGPT!
+It is a good idea to benchmark your interconnect (e.g. iperf3). In particular, if you don't have Infiniband then also prepe

@@ -10,3 +10,7 @@ __pycache__/
 input.txt
 env/
 venv/
+
+# Local source archives; extracted reproducibility JSONs are versioned instead.
+/test_results.zip
+/best_folder.zip
