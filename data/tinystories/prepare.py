@@ -1,5 +1,6 @@
 # Import required libraries:
 import os
+import argparse
 import random
 import numpy as np
 from datasets import load_dataset
@@ -7,6 +8,16 @@ from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import ByteLevel
+
+parser = argparse.ArgumentParser(description="Prepare TinyStories token streams.")
+parser.add_argument('--reuse-tokenizer', action='store_true',
+                    help='load shared_bpe_tokenizer.json instead of fitting/overwriting it')
+args = parser.parse_args()
+if args.reuse_tokenizer:
+    # Fail before any dataset download if the frozen tokenizer is missing.
+    tokenizer = Tokenizer.from_file("shared_bpe_tokenizer.json")
+    if tokenizer.get_vocab_size() != 8000 or tokenizer.token_to_id("<|endoftext|>") is None:
+        raise ValueError("Expected the project's saved 8000-token tokenizer with EOS")
 
 # Normalization Rules:
 ## Text normalization: strip whitespace and convert to lowercase
@@ -58,19 +69,20 @@ large_pool_size = 1000000  # approx 250 MB of text
 small_pool = train_clean[:small_pool_size]
 large_pool = train_clean[:large_pool_size]
 
-# Save large pool temporarily to train tokenizer
-with open("temp_train_large.txt", "w", encoding="utf-8") as f:
-    f.write("<|endoftext|>".join(large_pool))
+if not args.reuse_tokenizer:
+    # Save large pool temporarily to train tokenizer
+    with open("temp_train_large.txt", "w", encoding="utf-8") as f:
+        f.write("<|endoftext|>".join(large_pool))
 
-## Train Byte-level BPE Tokenizer (about 8,000 vocab) on large pool
-tokenizer = Tokenizer(BPE(unk_token="<|unk|>"))
-tokenizer.pre_tokenizer = ByteLevel()
-trainer = BpeTrainer(vocab_size=8000, special_tokens=["<|endoftext|>", "<|unk|>"])
+    ## Train Byte-level BPE Tokenizer (about 8,000 vocab) on large pool
+    tokenizer = Tokenizer(BPE(unk_token="<|unk|>"))
+    tokenizer.pre_tokenizer = ByteLevel()
+    trainer = BpeTrainer(vocab_size=8000, special_tokens=["<|endoftext|>", "<|unk|>"])
 
-## Train it only on training text and freeze it[cite: 5]
-tokenizer.train(files=["temp_train_large.txt"], trainer=trainer)
-tokenizer.save("shared_bpe_tokenizer.json")
-os.remove("temp_train_large.txt") # Clean up
+    ## Train it only on training text and freeze it[cite: 5]
+    tokenizer.train(files=["temp_train_large.txt"], trainer=trainer)
+    tokenizer.save("shared_bpe_tokenizer.json")
+    os.remove("temp_train_large.txt") # Clean up
 
 ## Encode datasets to binary for nanoGPT
 eos_id = tokenizer.token_to_id("<|endoftext|>")
