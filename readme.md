@@ -6,8 +6,7 @@ T4 GPU, does a smaller model that processes more text outperform a larger one,
 and does the answer change when unique training data is limited?**
 
 The complete Overleaf source is in [`report/`](report/), with `main.tex`,
-`references.bib`, `validation_loss_all_runs.png`, and `nus_logo.jpg`. A compiled
-final PDF has not yet been included or checked for the 10-page limit. Authors are listed in
+`references.bib`, `validation_loss_all_runs.png`, and `nus_logo.jpg`. The compiled report is [`report/Assignment_Group38.pdf`](report/Assignment_Group38.pdf). Authors are listed in
 [`authors.md`](authors.md). The code builds on Andrej Karpathy's
 [nanoGPT](https://github.com/karpathy/nanoGPT) (MIT licence); see *Credit*
 at the end of this file.
